@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 function formatSeconds(totalSeconds: number) {
   const mm = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
@@ -8,15 +8,38 @@ function formatSeconds(totalSeconds: number) {
 }
 
 export default function Queue() {
-  const navigate = useNavigate();
-
   const [inPool, setInPool] = useState(false);
   const [secondsSearching, setSecondsSearching] = useState(0);
+  const [apiConnected, setApiConnected] = useState<null | boolean>(null);
 
   // For now: hardcoded gems. Later this comes from backend/user state.
   const gems = 3;
   const gemMax = 3;
 
+  // API base (dev)
+  const API_BASE = "http://localhost:3001";
+
+  // Check API connectivity once on mount
+  useEffect(() => {
+    let cancelled = false;
+
+    async function check() {
+      try {
+        const res = await fetch(`${API_BASE}/ping`);
+        if (!res.ok) throw new Error("bad status");
+        if (!cancelled) setApiConnected(true);
+      } catch {
+        if (!cancelled) setApiConnected(false);
+      }
+    }
+
+    check();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Search timer
   useEffect(() => {
     if (!inPool) return;
 
@@ -24,18 +47,8 @@ export default function Queue() {
       setSecondsSearching((s) => s + 1);
     }, 1000);
 
-    // DEV SIMULATION: "found match" after 5 seconds
-    const matchId = window.setTimeout(() => {
-      setInPool(false);
-      setSecondsSearching(0);
-      navigate("/preview");
-    }, 5000);
-
-    return () => {
-      window.clearInterval(id);
-      window.clearTimeout(matchId);
-    };
-  }, [inPool, navigate]);
+    return () => window.clearInterval(id);
+  }, [inPool]);
 
   const searchingLabel = useMemo(() => {
     return `Searching: ${formatSeconds(secondsSearching)}`;
@@ -46,7 +59,7 @@ export default function Queue() {
     setSecondsSearching(0);
   }
 
-  function cancelSearch() {
+  function leavePool() {
     setInPool(false);
     setSecondsSearching(0);
   }
@@ -58,6 +71,15 @@ export default function Queue() {
 
         <p style={styles.subtitle}>
           {inPool ? "Stay ready. Matches happen live." : "Live matching. Two minutes. No swiping."}
+        </p>
+
+        <p style={styles.apiLine}>
+          API:{" "}
+          {apiConnected === null
+            ? "checking…"
+            : apiConnected
+              ? "connected"
+              : "not connected"}
         </p>
 
         <div style={styles.gems}>
@@ -78,16 +100,14 @@ export default function Queue() {
               <span style={styles.statusText}>{searchingLabel}</span>
             </div>
 
-            <button style={styles.secondaryBtn} onClick={cancelSearch}>
+            <button style={styles.secondaryBtn} onClick={leavePool}>
               Cancel Search
             </button>
           </>
         )}
 
         <p style={styles.micro}>
-          {inPool
-            ? "You can cancel while searching. Penalties only apply after you’re matched."
-            : "Matches are live. Once matched, leaving early forces you to wait out the timer."}
+          Matches are live. If you leave mid-room, you stay until the timer ends.
         </p>
 
         <Link to="/" style={styles.back}>
@@ -121,7 +141,9 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 16,
   },
   title: { fontSize: "2rem", margin: 0 },
-  subtitle: { opacity: 0.8 },
+  subtitle: { opacity: 0.8, margin: 0 },
+  apiLine: { opacity: 0.7, margin: 0, fontSize: 13 },
+
   gems: {
     display: "flex",
     justifyContent: "space-between",
@@ -166,10 +188,9 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 999,
     background: "white",
     boxShadow: "0 0 18px rgba(255,255,255,0.7)",
-    animation: "pulse 1.2s infinite ease-in-out",
   },
   statusText: { fontWeight: 700, opacity: 0.9 },
 
-  micro: { opacity: 0.6, fontSize: 13 },
+  micro: { opacity: 0.6, fontSize: 13, margin: 0 },
   back: { color: "rgba(255,255,255,0.7)", textDecoration: "none" },
 };

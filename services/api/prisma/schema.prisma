@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  // Prisma v7: url is defined via prisma.config.ts (you already have this)
+  // so we do NOT put url = env("DATABASE_URL") here.
+}
+
+model User {
+  id           String        @id @default(cuid())
+  email        String        @unique
+  passwordHash String
+  firstName    String
+  birthYear    Int
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  settings     UserSettings?
+  gems         GemBalance?
+}
+
+model UserSettings {
+  id                     String   @id @default(cuid())
+  userId                 String   @unique
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // notification prefs
+  notifyEmail            Boolean  @default(true)
+  notifySms              Boolean  @default(false)
+
+  // alerts
+  notifyOnGemRegain      Boolean  @default(true)
+  notifyOnGemsFull       Boolean  @default(true)
+
+  // contact destinations (optional)
+  emailForNotifs         String?
+  phoneForSms            String?
+
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+
+model GemBalance {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  gems               Int      @default(3)
+  gemMax             Int      @default(3)
+
+  // when gems are not full, we track the next time a gem should be added
+  nextRegenAt         DateTime?
+
+  // "gems full" reminder throttling (every 72h)
+  lastFullNotifiedAt  DateTime?
+
+  updatedAt           DateTime @updatedAt
+}
