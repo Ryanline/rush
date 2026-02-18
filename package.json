@@ -1,0 +1,12 @@
+{
+  "name": "rush",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "echo \"Use workspace scripts (later).\""
+  }
+}
