@@ -3,12 +3,13 @@ import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import sensible from "@fastify/sensible";
+import websocket from "@fastify/websocket";
 import "dotenv/config";
-import { meRoutes } from "./routes/me";
 
 import prismaPlugin from "./plugins/prisma";
 import jwtPlugin from "./plugins/jwt";
 import { authRoutes } from "./routes/auth";
+import { wsRoutes } from "./routes/ws";
 
 async function buildServer() {
   const app = Fastify({ logger: true });
@@ -24,6 +25,9 @@ async function buildServer() {
     credentials: true,
   });
 
+  // WebSockets
+  await app.register(websocket);
+
   // Core plugins
   await app.register(prismaPlugin);
   await app.register(jwtPlugin);
@@ -34,7 +38,7 @@ async function buildServer() {
 
   // Routes
   await app.register(authRoutes);
-  await app.register(meRoutes);
+  await app.register(wsRoutes);
 
   return app;
 }
