@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
 function formatSeconds(totalSeconds: number) {
   const mm = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
@@ -7,25 +7,63 @@ function formatSeconds(totalSeconds: number) {
   return `${mm}:${ss}`;
 }
 
+function getOrCreateDevUserId(): string {
+  const key = "rush_dev_user";
+  const existing = localStorage.getItem(key);
+  if (existing) return existing;
+
+  const id = `dev_${Math.random().toString(16).slice(2, 8)}`;
+  localStorage.setItem(key, id);
+  return id;
+}
+
+function getOrCreateWs(wsBase: string): WebSocket {
+  const w = window as any;
+
+  const existing: WebSocket | undefined = w.__rush_ws;
+  if (
+    existing &&
+    (existing.readyState === WebSocket.OPEN ||
+      existing.readyState === WebSocket.CONNECTING)
+  ) {
+    return existing;
+  }
+
+  const devUser = getOrCreateDevUserId();
+  const wsUrl = `${wsBase}?token=dev&user=${encodeURIComponent(devUser)}`;
+
+  console.log("[ws] connecting to", wsUrl);
+  const ws = new WebSocket(wsUrl);
+  w.__rush_ws = ws;
+  return ws;
+}
+
 export default function Queue() {
+  const navigate = useNavigate();
+
   const [inPool, setInPool] = useState(false);
   const [secondsSearching, setSecondsSearching] = useState(0);
   const [apiConnected, setApiConnected] = useState<null | boolean>(null);
 
-  // For now: hardcoded gems. Later this comes from backend/user state.
+  const [wsStatus, setWsStatus] = useState<"connecting" | "open" | "closed" | "error">(
+    "connecting"
+  );
+  const [wsCloseInfo, setWsCloseInfo] = useState<string>("");
+
+  const wsRef = useRef<WebSocket | null>(null);
+
   const gems = 3;
   const gemMax = 3;
 
-  // API base (dev)
-  const API_BASE = "http://localhost:3001";
+  const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:3001";
+  const WS_BASE = (import.meta as any).env?.VITE_WS_URL || "ws://127.0.0.1:3001/ws";
 
-  // Check API connectivity once on mount
   useEffect(() => {
     let cancelled = false;
 
     async function check() {
       try {
-        const res = await fetch(`${API_BASE}/ping`);
+        const res = await fetch(`${API_BASE}/health/live`);
         if (!res.ok) throw new Error("bad status");
         if (!cancelled) setApiConnected(true);
       } catch {
@@ -37,9 +75,71 @@ export default function Queue() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [API_BASE]);
 
-  // Search timer
+  useEffect(() => {
+    const ws = getOrCreateWs(WS_BASE);
+    wsRef.current = ws;
+
+    const onOpen = () => {
+      console.log("[ws] open");
+      setWsStatus("open");
+      setWsCloseInfo("");
+    };
+
+    const onError = (e: Event) => {
+      console.log("[ws] error", e);
+      setWsStatus("error");
+    };
+
+    const onClose = (ev: CloseEvent) => {
+      console.log("[ws] closed", { code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
+      setWsStatus("closed");
+      setWsCloseInfo(`code ${ev.code}${ev.reason ? `: ${ev.reason}` : ""}`);
+    };
+
+    const onMessage = (ev: MessageEvent) => {
+      console.log("[ws] raw", ev.data);
+      try {
+        const msg = JSON.parse(String(ev.data));
+
+        if (msg.type === "MATCH_FOUND") {
+          setInPool(false);
+          setSecondsSearching(0);
+
+          navigate(`/match/${encodeURIComponent(msg.matchId)}`, {
+            state: { matchId: msg.matchId, peerId: msg.peerId, endsAt: msg.endsAt },
+          });
+          return;
+        }
+
+        if (msg.type === "MATCH_ENDED") {
+          setInPool(false);
+          setSecondsSearching(0);
+          return;
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    if (ws.readyState === WebSocket.CONNECTING) setWsStatus("connecting");
+    if (ws.readyState === WebSocket.OPEN) setWsStatus("open");
+    if (ws.readyState === WebSocket.CLOSED) setWsStatus("closed");
+
+    ws.addEventListener("open", onOpen);
+    ws.addEventListener("error", onError);
+    ws.addEventListener("close", onClose);
+    ws.addEventListener("message", onMessage);
+
+    return () => {
+      ws.removeEventListener("open", onOpen);
+      ws.removeEventListener("error", onError);
+      ws.removeEventListener("close", onClose);
+      ws.removeEventListener("message", onMessage);
+    };
+  }, [WS_BASE, navigate]);
+
   useEffect(() => {
     if (!inPool) return;
 
@@ -57,11 +157,25 @@ export default function Queue() {
   function enterPool() {
     setInPool(true);
     setSecondsSearching(0);
+
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "POOL_JOIN" }));
+      console.log("[ws] sent POOL_JOIN");
+    } else {
+      console.warn("WS not open yet", ws?.readyState);
+    }
   }
 
   function leavePool() {
     setInPool(false);
     setSecondsSearching(0);
+
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "POOL_LEAVE" }));
+      console.log("[ws] sent POOL_LEAVE");
+    }
   }
 
   return (
@@ -74,12 +188,18 @@ export default function Queue() {
         </p>
 
         <p style={styles.apiLine}>
-          API:{" "}
-          {apiConnected === null
-            ? "checking…"
-            : apiConnected
+          API: {apiConnected === null ? "checking…" : apiConnected ? "connected" : "not connected"}
+        </p>
+
+        <p style={styles.apiLine}>
+          WS:{" "}
+          {wsStatus === "connecting"
+            ? "connecting…"
+            : wsStatus === "open"
               ? "connected"
-              : "not connected"}
+              : wsStatus === "error"
+                ? "error"
+                : `closed${wsCloseInfo ? ` (${wsCloseInfo})` : ""}`}
         </p>
 
         <div style={styles.gems}>
@@ -90,7 +210,7 @@ export default function Queue() {
         </div>
 
         {!inPool ? (
-          <button style={styles.primaryBtn} onClick={enterPool}>
+          <button style={styles.primaryBtn} onClick={enterPool} disabled={wsStatus !== "open"}>
             Enter the Pool
           </button>
         ) : (

@@ -7,6 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "echo \"Use workspace scripts (later).\""
+    "dev": "echo \"Use workspace scripts (later).\"",
+    "tree": "tree /F /A | findstr /V \"node_modules .git dist build\" > tree.txt"
   }
 }

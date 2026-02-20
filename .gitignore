@@ -7,3 +7,6 @@ coverage/
 
 services/api/dev.db
 services/api/.env
+tree.txt
+apps/web/.env.local
+.env*

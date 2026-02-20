@@ -9,6 +9,7 @@ import Queue from "./pages/Queue";
 import Preview from "./pages/Preview";
 import Chat from "./pages/Chat";
 import PostChat from "./pages/PostChat";
+import Match from "./pages/Match";
 
 
 function AppRouter() {
@@ -22,6 +23,7 @@ function AppRouter() {
         <Route path="/preview" element={<Preview />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/post-chat" element={<PostChat />} />
+        <Route path="/match/:matchId" element={<Match />} />
       </Routes>
     </BrowserRouter>
   );
