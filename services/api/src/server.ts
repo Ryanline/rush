@@ -10,6 +10,7 @@ import prismaPlugin from "./plugins/prisma";
 import jwtPlugin from "./plugins/jwt";
 import { authRoutes } from "./routes/auth";
 import { wsRoutes } from "./routes/ws";
+import { gemsRoutes } from "./routes/gems";
 
 async function buildServer() {
   const app = Fastify({ logger: true });
@@ -38,6 +39,7 @@ async function buildServer() {
 
   // Routes
   await app.register(authRoutes);
+  await app.register(gemsRoutes);
   await app.register(wsRoutes);
 
   return app;

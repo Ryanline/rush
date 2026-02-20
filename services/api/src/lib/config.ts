@@ -1,8 +1,8 @@
 export const config = {
   chat: {
     previewSeconds: 10,
-    primaryChatSeconds: 120, // 2 minutes
-    extendChatSeconds: 300,  // 5 minutes
+    primaryChatSeconds: 15,
+    extendChatSeconds: 7,
     extendHandshakeSeconds: 15,
   },
 

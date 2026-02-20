@@ -61,6 +61,7 @@ export default function Match() {
   const initialEndsAt = (location.state as any)?.endsAt ? Number((location.state as any).endsAt) : null;
 
   const WS_BASE = (import.meta as any).env?.VITE_WS_URL || "ws://127.0.0.1:3001/ws";
+  const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:3001";
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -76,13 +77,32 @@ export default function Match() {
   const [decisionSeconds, setDecisionSeconds] = useState<number>(10);
   const [extendPressed, setExtendPressed] = useState(false);
 
-  // ✅ Persistent extended banner
+  // Persistent extended banner
   const [extendedActive, setExtendedActive] = useState(false);
   const [extendedBy, setExtendedBy] = useState<string>("");
+
+  // Gems UI
+  const [gemBalance, setGemBalance] = useState<number | null>(null);
+  const [gemMsg, setGemMsg] = useState<string>("");
 
   const [secondsLeft, setSecondsLeft] = useState<number>(
     endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : 0
   );
+
+  const devUserId = useMemo(() => getOrCreateDevUserId(), []);
+
+  async function refreshGems() {
+    try {
+      const url = `${API_BASE}/gems/dev?userId=${encodeURIComponent(devUserId)}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data?.ok && data?.gems) {
+        setGemBalance(Number(data.gems.gems));
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   // Countdown derived from endsAt
   useEffect(() => {
@@ -98,8 +118,6 @@ export default function Match() {
   // Safety: if time runs out again, extended banner should not persist
   useEffect(() => {
     if (secondsLeft <= 0) {
-      // We keep ended menu logic controlled by server MATCH_ENDED,
-      // but this ensures the banner doesn't stick around forever.
       setExtendedActive(false);
       setExtendedBy("");
     }
@@ -124,17 +142,17 @@ export default function Match() {
         if (msg.type === "TIMER_UPDATE") {
           if (msg.matchId !== matchId) return;
 
-          // Update timer
           setEndsAt(msg.endsAt);
 
-          // Resume match UI (close end menu)
           setEnded(null);
           setDecisionSeconds(10);
           setExtendPressed(false);
 
-          // ✅ Persistent banner until match ends
           setExtendedActive(true);
           setExtendedBy(msg.by || "");
+
+          setGemMsg("");
+          refreshGems();
 
           return;
         }
@@ -158,15 +176,28 @@ export default function Match() {
           setDecisionSeconds(10);
           setExtendPressed(false);
 
-          // If the match ended again, extension is no longer active
           setExtendedActive(false);
           setExtendedBy("");
+
+          setGemMsg("");
+          refreshGems();
 
           return;
         }
 
         if (msg.type === "ERROR") {
-          // Extend errors etc.
+          if (msg.error === "EXTEND_PENDING") {
+            setExtendPressed(false);
+            return;
+          }
+
+          if (msg.error === "NOT_ENOUGH_GEMS") {
+            setExtendPressed(false);
+            setGemMsg("Not enough gems.");
+            refreshGems();
+            return;
+          }
+
           setExtendPressed(false);
           return;
         }
@@ -177,9 +208,10 @@ export default function Match() {
 
     ws.addEventListener("message", onMessage);
     return () => ws.removeEventListener("message", onMessage);
-  }, [WS_BASE, matchId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [WS_BASE, matchId, API_BASE, devUserId]);
 
-  // 10-second decision countdown once ended
+  // decision countdown once ended
   useEffect(() => {
     if (!ended) return;
 
@@ -194,7 +226,6 @@ export default function Match() {
   useEffect(() => {
     if (!ended) return;
     if (decisionSeconds !== 0) return;
-
     navigate("/queue");
   }, [ended, decisionSeconds, navigate]);
 
@@ -235,6 +266,7 @@ export default function Match() {
     if (!ended || ended.reason !== "timeout") return;
     if (extendPressed) return;
 
+    setGemMsg("");
     setExtendPressed(true);
 
     const ok = wsSend({ type: "MATCH_EXTEND", matchId });
@@ -267,7 +299,6 @@ export default function Match() {
           </div>
         ) : null}
 
-        {/* ✅ Persistent extended banner */}
         {extendedActive && !ended ? (
           <div style={styles.extendedBanner}>
             <strong style={styles.extendedStrong}>{extendedLabel}</strong>
@@ -284,6 +315,13 @@ export default function Match() {
           <div style={styles.endMenu}>
             <div style={styles.endTitle}>{endedTitle}</div>
             <div style={styles.endSub}>Choose an option ({decisionSeconds}s)…</div>
+
+            <div style={styles.gemRow}>
+              <span style={styles.gemLabel}>Gems</span>
+              <span style={styles.gemValue}>{gemBalance === null ? "…" : gemBalance}</span>
+            </div>
+
+            {gemMsg ? <div style={styles.gemMsg}>{gemMsg}</div> : null}
 
             <div style={styles.endBtns}>
               <button
@@ -458,6 +496,19 @@ const styles: Record<string, React.CSSProperties> = {
   },
   endTitle: { fontWeight: 950, fontSize: 22 },
   endSub: { opacity: 0.8 },
+
+  gemRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "10px 14px",
+    borderRadius: 12,
+    background: "rgba(255,255,255,0.06)",
+  },
+  gemLabel: { opacity: 0.8, fontWeight: 800 },
+  gemValue: { fontWeight: 950 },
+  gemMsg: { opacity: 0.9, fontSize: 13 },
+
   endBtns: { display: "flex", flexDirection: "column", gap: 10 },
   endHint: { opacity: 0.65, fontSize: 13 },
 

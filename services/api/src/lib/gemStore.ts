@@ -1,4 +1,6 @@
 // services/api/src/lib/gemStore.ts
+// DEV-ONLY in-memory gem store (used for dev WS bypass and /gems/dev).
+// Production should use Prisma-backed gems (lib/gems.ts).
 
 export type GemAccount = {
   balance: number;
@@ -7,7 +9,8 @@ export type GemAccount = {
 
 const accounts = new Map<string, GemAccount>();
 
-// 💎 In-memory defaults for the "no DB yet" phase
+// Keep these aligned with your config defaults for dev testing.
+// (You can change to 3 or whatever you want.)
 const DEFAULT_STARTING_GEMS = 3;
 const MATCH_EXTEND_GEM_COST = 1;
 
@@ -52,14 +55,12 @@ export function spendGems(
   return { ok: true, balance: acct.balance };
 }
 
-/**
- * Convenience for match extension (spends MATCH_EXTEND_GEM_COST).
- */
+/** Convenience for match extension (spends MATCH_EXTEND_GEM_COST). */
 export function spendExtendGem(userId: string) {
   return spendGems(userId, MATCH_EXTEND_GEM_COST);
 }
 
-// Optional: helpful for local dev / tests
+/** Helpful for local dev / tests */
 export function _dangerousResetAllGemAccounts() {
   accounts.clear();
 }

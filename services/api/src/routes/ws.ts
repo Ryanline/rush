@@ -1,5 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import { getBalance, spendExtendGem } from "../lib/gemStore";
+import { config } from "../lib/config";
+import { getBalance, spendExtendGem } from "../lib/gemStore.js";
+import { syncGems, spendGem } from "../lib/gems";
 
 type ClientMsg =
   | { type: "POOL_JOIN" }
@@ -23,6 +25,7 @@ type ClientConn = {
   socket: any;
   socketId: number;
   matchId: string | null;
+  isDev: boolean;
 };
 
 type Match = {
@@ -32,24 +35,20 @@ type Match = {
   endsAt: number;
   timeoutId: ReturnType<typeof setTimeout>;
 
-  // reconnect grace
   disconnectTimers: Map<string, ReturnType<typeof setTimeout>>;
 
-  // timeout decision window
   state: "active" | "ended_timeout";
-  finalizeAt: number | null; // epoch ms when we will finalize, if ended_timeout
+  finalizeAt: number | null;
   finalizeId: ReturnType<typeof setTimeout> | null;
 
-  // Two-party extend consent (kept silent)
   extendVotes: Set<string>;
 };
 
 const DISCONNECT_GRACE_MS = 5000;
-const TIMEOUT_DECISION_MS = 10_000;
 
-// ⏱ testing values
-const INITIAL_MATCH_MS = 10_000; // 10 seconds
-const EXTEND_MS = 5_000; // 5 seconds
+const TIMEOUT_DECISION_MS = Math.max(1000, config.chat.extendHandshakeSeconds * 1000);
+const INITIAL_MATCH_MS = Math.max(1000, config.chat.primaryChatSeconds * 1000);
+const EXTEND_MS = Math.max(1000, config.chat.extendChatSeconds * 1000);
 
 const clients = new Map<string, ClientConn>();
 const pool: string[] = [];
@@ -60,9 +59,7 @@ let nextSocketId = 1;
 function send(socket: any, msg: ServerMsg) {
   try {
     socket.send(JSON.stringify(msg));
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 function inPool(userId: string) {
@@ -94,7 +91,6 @@ function notifyPeerStatus(matchId: string, match: Match, subjectUserId: string, 
   const peerId = otherIdFor(match, subjectUserId);
   const peerConn = clients.get(peerId);
   if (!peerConn) return;
-
   send(peerConn.socket, { type: "PEER_STATUS", matchId, peerId: subjectUserId, status });
 }
 
@@ -143,7 +139,6 @@ function clearFinalizeTimer(m: Match) {
 
 function scheduleMatchTimeout(matchId: string, m: Match) {
   clearTimeoutTimer(m);
-
   m.timeoutId = setTimeout(() => {
     const still = matches.get(matchId);
     if (!still) return;
@@ -154,17 +149,13 @@ function scheduleMatchTimeout(matchId: string, m: Match) {
 function finalizeTimeout(matchId: string) {
   const m = matches.get(matchId);
   if (!m) return;
-
-  // If match got extended/resumed, do nothing
   if (m.state !== "ended_timeout") return;
 
-  // Clear match state for participants so they can queue again
   const ca = clients.get(m.a);
   const cb = clients.get(m.b);
   if (ca?.matchId === matchId) ca.matchId = null;
   if (cb?.matchId === matchId) cb.matchId = null;
 
-  // Stop timers and remove match
   clearTimeoutTimer(m);
   clearFinalizeTimer(m);
   m.disconnectTimers.forEach((t) => {
@@ -181,21 +172,17 @@ function onTimeout(matchId: string) {
   const m = matches.get(matchId);
   if (!m) return;
 
-  // Enter decision window
   m.state = "ended_timeout";
   m.finalizeAt = Date.now() + TIMEOUT_DECISION_MS;
 
-  // Clear any pending extend votes when entering timeout menu
   m.extendVotes.clear();
 
-  // Notify both sides (if connected). Keep match around for potential Extend.
   const ca = clients.get(m.a);
   const cb = clients.get(m.b);
 
   if (ca?.matchId === matchId) send(ca.socket, { type: "MATCH_ENDED", reason: "timeout" });
   if (cb?.matchId === matchId) send(cb.socket, { type: "MATCH_ENDED", reason: "timeout" });
 
-  // Finalize after decision window
   clearFinalizeTimer(m);
   m.finalizeId = setTimeout(() => finalizeTimeout(matchId), TIMEOUT_DECISION_MS);
 }
@@ -266,6 +253,44 @@ function tryMatchmake() {
   }
 }
 
+// ---- Gems helpers (dev uses gemStore, prod uses Prisma) ----
+async function canPay(app: FastifyInstance, userId: string, isDev: boolean) {
+  if (isDev) return getBalance(userId) > 0;
+  const gb = await syncGems(app.prisma, userId);
+  return (gb.gems ?? 0) > 0;
+}
+
+async function chargeBothOrFail(app: FastifyInstance, a: string, b: string, aDev: boolean, bDev: boolean) {
+  if (aDev && bDev) {
+    const sa = spendExtendGem(a);
+    const sb = spendExtendGem(b);
+    if (!sa.ok || !sb.ok) return { ok: false as const, who: !sa.ok ? "a" : "b" };
+    return { ok: true as const };
+  }
+
+  // If either side is non-dev, use Prisma transaction (real path)
+  return app.prisma.$transaction(async (tx) => {
+    // For dev user inside transaction, we still use gemStore.
+    if (aDev) {
+      const sa = spendExtendGem(a);
+      if (!sa.ok) return { ok: false as const, who: "a" as const };
+    } else {
+      const aUpdated = await spendGem(tx as any, a);
+      if (!aUpdated) return { ok: false as const, who: "a" as const };
+    }
+
+    if (bDev) {
+      const sb = spendExtendGem(b);
+      if (!sb.ok) return { ok: false as const, who: "b" as const };
+    } else {
+      const bUpdated = await spendGem(tx as any, b);
+      if (!bUpdated) return { ok: false as const, who: "b" as const };
+    }
+
+    return { ok: true as const };
+  });
+}
+
 export async function wsRoutes(app: FastifyInstance) {
   app.get("/ws", { websocket: true }, (connection: any, req: any) => {
     const socket = connection?.socket ?? connection;
@@ -273,8 +298,9 @@ export async function wsRoutes(app: FastifyInstance) {
     const token = (req.query as any)?.token as string | undefined;
     const isProd = process.env.NODE_ENV === "production";
 
-    // DEV bypass
     let userId = "";
+    let isDev = false;
+
     const devUser = String((req.query as any)?.user ?? "").trim();
     const devToken = String(process.env.DEV_WS_BYPASS_TOKEN || "dev");
 
@@ -286,6 +312,7 @@ export async function wsRoutes(app: FastifyInstance) {
     }
 
     if (!isProd && token === devToken) {
+      isDev = true;
       userId = devUser || `dev_${Math.random().toString(16).slice(2, 8)}`;
     } else {
       try {
@@ -301,7 +328,6 @@ export async function wsRoutes(app: FastifyInstance) {
 
     const socketId = nextSocketId++;
 
-    // Close old socket on reconnect
     const existing = clients.get(userId);
     if (existing) {
       try {
@@ -310,11 +336,10 @@ export async function wsRoutes(app: FastifyInstance) {
       removeFromPool(userId);
     }
 
-    clients.set(userId, { userId, socket, socketId, matchId: null });
+    clients.set(userId, { userId, socket, socketId, matchId: null, isDev });
 
     send(socket, { type: "WS_READY" });
 
-    // Reattach if user is in a match
     const active = findMatchForUser(userId);
     if (active) {
       clearDisconnectTimer(active.matchId, active.match, userId);
@@ -329,13 +354,12 @@ export async function wsRoutes(app: FastifyInstance) {
         endsAt: active.match.endsAt,
       });
 
-      // If match is in the "ended timeout menu" state, re-send MATCH_ENDED so UI shows menu
       if (active.match.state === "ended_timeout") {
         send(socket, { type: "MATCH_ENDED", reason: "timeout" });
       }
     }
 
-    socket.on("message", (raw: any) => {
+    socket.on("message", async (raw: any) => {
       let msg: ClientMsg | any;
       try {
         msg = JSON.parse(raw.toString());
@@ -371,14 +395,11 @@ export async function wsRoutes(app: FastifyInstance) {
         if (!text.trim()) return;
 
         const conn = clients.get(userId);
-        if (!conn?.matchId || conn.matchId !== matchId) {
-          return send(socket, { type: "ERROR", error: "NOT_IN_MATCH" });
-        }
+        if (!conn?.matchId || conn.matchId !== matchId) return send(socket, { type: "ERROR", error: "NOT_IN_MATCH" });
 
         const m = matches.get(matchId);
         if (!m) return send(socket, { type: "ERROR", error: "NO_SUCH_MATCH" });
 
-        // No chat during end menu window
         if (m.state !== "active") return;
 
         const otherId = m.a === userId ? m.b : m.a;
@@ -405,75 +426,55 @@ export async function wsRoutes(app: FastifyInstance) {
         const m = matches.get(matchId);
         if (!m) return send(socket, { type: "ERROR", error: "NO_SUCH_MATCH" });
 
-        // must be participant
         if (m.a !== userId && m.b !== userId) return send(socket, { type: "ERROR", error: "NOT_IN_MATCH" });
-
-        // Only allow extend during timeout menu window
         if (m.state !== "ended_timeout") return send(socket, { type: "ERROR", error: "NOT_EXTENDABLE" });
 
-        // Must still be within decision window
-        if (m.finalizeAt && Date.now() > m.finalizeAt) {
-          return send(socket, { type: "ERROR", error: "EXTEND_WINDOW_EXPIRED" });
+        if (m.finalizeAt && Date.now() > m.finalizeAt) return send(socket, { type: "ERROR", error: "EXTEND_WINDOW_EXPIRED" });
+
+        const me = clients.get(userId);
+        const meDev = !!me?.isDev;
+
+        // Only tell THIS user if they can't afford
+        try {
+          const ok = await canPay(app, userId, meDev);
+          if (!ok) return send(socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
+        } catch {
+          return send(socket, { type: "ERROR", error: "GEM_CHECK_FAILED" });
         }
 
-        // If user can't afford, tell ONLY them (this doesn't reveal anything about the peer)
-        if (getBalance(userId) <= 0) {
-          return send(socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
-        }
-
-        // Record vote (silent). Always ACK so the client button doesn't get stuck.
+        // silent vote
         m.extendVotes.add(userId);
         send(socket, { type: "ERROR", error: "EXTEND_PENDING" });
 
-        // If both have voted, then and only then: charge both + extend.
         const bothVoted = m.extendVotes.has(m.a) && m.extendVotes.has(m.b);
         if (!bothVoted) return;
 
-        // Check affordability for BOTH without revealing votes/status.
-        // If either can't pay, extension simply will not happen. Only notify the broke user.
-        const aCanPay = getBalance(m.a) > 0;
-        const bCanPay = getBalance(m.b) > 0;
+        // both voted: check both can pay (still silent)
+        const ca = clients.get(m.a);
+        const cb = clients.get(m.b);
+        const aDev = !!ca?.isDev;
+        const bDev = !!cb?.isDev;
 
-        if (!aCanPay || !bCanPay) {
-          // Clear votes so they can try again (still silent)
+        const aCan = await canPay(app, m.a, aDev);
+        const bCan = await canPay(app, m.b, bDev);
+
+        if (!aCan || !bCan) {
           m.extendVotes.clear();
-
-          if (!aCanPay) {
-            const ca = clients.get(m.a);
-            if (ca?.matchId === matchId) send(ca.socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
-          }
-          if (!bCanPay) {
-            const cb = clients.get(m.b);
-            if (cb?.matchId === matchId) send(cb.socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
-          }
-
+          if (!aCan && ca?.matchId === matchId) send(ca.socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
+          if (!bCan && cb?.matchId === matchId) send(cb.socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
           return;
         }
 
-        // Spend from BOTH. If anything fails (shouldn't given checks), do not extend.
-        const spentA = spendExtendGem(m.a);
-        const spentB = spendExtendGem(m.b);
-
-        if (!spentA.ok || !spentB.ok) {
-          // Attempt to avoid inconsistent future behavior by clearing votes.
-          // (In-memory store makes true rollback annoying; this should be extremely rare.)
+        const charged = await chargeBothOrFail(app, m.a, m.b, aDev, bDev);
+        if (!charged.ok) {
           m.extendVotes.clear();
-
-          if (!spentA.ok) {
-            const ca = clients.get(m.a);
-            if (ca?.matchId === matchId) send(ca.socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
-          }
-          if (!spentB.ok) {
-            const cb = clients.get(m.b);
-            if (cb?.matchId === matchId) send(cb.socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
-          }
-
+          if (charged.who === "a" && ca?.matchId === matchId) send(ca.socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
+          if (charged.who === "b" && cb?.matchId === matchId) send(cb.socket, { type: "ERROR", error: "NOT_ENOUGH_GEMS" });
           return;
         }
 
-        // Success: clear votes, resume match, extend time.
+        // extend success
         m.extendVotes.clear();
-
         clearFinalizeTimer(m);
         m.state = "active";
         m.finalizeAt = null;
@@ -481,10 +482,6 @@ export async function wsRoutes(app: FastifyInstance) {
         m.endsAt = Math.max(Date.now(), m.endsAt) + EXTEND_MS;
         scheduleMatchTimeout(matchId, m);
 
-        const ca = clients.get(m.a);
-        const cb = clients.get(m.b);
-
-        // We DO notify both only on success (allowed)
         if (ca?.matchId === matchId) send(ca.socket, { type: "TIMER_UPDATE", matchId, endsAt: m.endsAt, by: userId });
         if (cb?.matchId === matchId) send(cb.socket, { type: "TIMER_UPDATE", matchId, endsAt: m.endsAt, by: userId });
 
