@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { API_BASE, authFetch, buildWsUrl, clearAuth } from "../lib/auth";
 
 function formatSeconds(totalSeconds: number) {
   const mm = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
@@ -7,34 +8,29 @@ function formatSeconds(totalSeconds: number) {
   return `${mm}:${ss}`;
 }
 
-function getOrCreateDevUserId(): string {
-  const key = "rush_dev_user";
-  const existing = localStorage.getItem(key);
-  if (existing) return existing;
+function getOrCreateWs(wsUrl: string): WebSocket {
+  const existing = window.__rush_ws;
+  const existingUrl = window.__rush_ws_url;
 
-  const id = `dev_${Math.random().toString(16).slice(2, 8)}`;
-  localStorage.setItem(key, id);
-  return id;
-}
-
-function getOrCreateWs(wsBase: string): WebSocket {
-  const w = window as any;
-
-  const existing: WebSocket | undefined = w.__rush_ws;
   if (
     existing &&
-    (existing.readyState === WebSocket.OPEN ||
-      existing.readyState === WebSocket.CONNECTING)
+    existingUrl === wsUrl &&
+    (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)
   ) {
     return existing;
   }
 
-  const devUser = getOrCreateDevUserId();
-  const wsUrl = `${wsBase}?token=dev&user=${encodeURIComponent(devUser)}`;
+  if (existing && existing.readyState === WebSocket.OPEN) {
+    try {
+      existing.close(1000, "reconnect");
+    } catch {
+      // ignore close failures
+    }
+  }
 
-  console.log("[ws] connecting to", wsUrl);
   const ws = new WebSocket(wsUrl);
-  w.__rush_ws = ws;
+  window.__rush_ws = ws;
+  window.__rush_ws_url = wsUrl;
   return ws;
 }
 
@@ -45,18 +41,12 @@ export default function Queue() {
   const [secondsSearching, setSecondsSearching] = useState(0);
   const [apiConnected, setApiConnected] = useState<null | boolean>(null);
 
-  const [wsStatus, setWsStatus] = useState<"connecting" | "open" | "closed" | "error">(
-    "connecting"
-  );
+  const [wsStatus, setWsStatus] = useState<"connecting" | "open" | "closed" | "error">("connecting");
   const [wsCloseInfo, setWsCloseInfo] = useState<string>("");
+  const [gems, setGems] = useState<number | null>(null);
+  const [gemMax, setGemMax] = useState<number | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-
-  const gems = 3;
-  const gemMax = 3;
-
-  const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:3001";
-  const WS_BASE = (import.meta as any).env?.VITE_WS_URL || "ws://127.0.0.1:3001/ws";
 
   useEffect(() => {
     let cancelled = false;
@@ -75,40 +65,72 @@ export default function Queue() {
     return () => {
       cancelled = true;
     };
-  }, [API_BASE]);
+  }, []);
 
   useEffect(() => {
-    const ws = getOrCreateWs(WS_BASE);
+    let cancelled = false;
+    async function loadGems() {
+      try {
+        const res = await authFetch("/gems");
+        if (!res.ok) {
+          if (res.status === 401) {
+            clearAuth();
+            navigate("/login", { replace: true });
+          }
+          return;
+        }
+        const data = await res.json();
+        if (!cancelled && data?.gems) {
+          setGems(Number(data.gems.gems));
+          setGemMax(Number(data.gems.gemMax));
+        }
+      } catch {
+        // ignore gem refresh failure
+      }
+    }
+
+    loadGems();
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate]);
+
+  useEffect(() => {
+    const wsUrl = buildWsUrl();
+    if (!wsUrl) {
+      clearAuth();
+      navigate("/login", { replace: true });
+      return;
+    }
+
+    const ws = getOrCreateWs(wsUrl);
     wsRef.current = ws;
 
     const onOpen = () => {
-      console.log("[ws] open");
       setWsStatus("open");
       setWsCloseInfo("");
     };
 
-    const onError = (e: Event) => {
-      console.log("[ws] error", e);
-      setWsStatus("error");
-    };
+    const onError = () => setWsStatus("error");
 
     const onClose = (ev: CloseEvent) => {
-      console.log("[ws] closed", { code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
       setWsStatus("closed");
       setWsCloseInfo(`code ${ev.code}${ev.reason ? `: ${ev.reason}` : ""}`);
+      if (ev.code === 4401 || ev.code === 4403) {
+        clearAuth();
+        navigate("/login", { replace: true });
+      }
     };
 
     const onMessage = (ev: MessageEvent) => {
-      console.log("[ws] raw", ev.data);
       try {
         const msg = JSON.parse(String(ev.data));
 
         if (msg.type === "MATCH_FOUND") {
           setInPool(false);
           setSecondsSearching(0);
-
           navigate(`/match/${encodeURIComponent(msg.matchId)}`, {
-            state: { matchId: msg.matchId, peerId: msg.peerId, endsAt: msg.endsAt },
+            state: { matchId: msg.matchId, peerId: msg.peerId, peerName: msg.peerName, endsAt: msg.endsAt },
           });
           return;
         }
@@ -116,10 +138,9 @@ export default function Queue() {
         if (msg.type === "MATCH_ENDED") {
           setInPool(false);
           setSecondsSearching(0);
-          return;
         }
       } catch {
-        // ignore
+        // ignore malformed socket message
       }
     };
 
@@ -138,63 +159,49 @@ export default function Queue() {
       ws.removeEventListener("close", onClose);
       ws.removeEventListener("message", onMessage);
     };
-  }, [WS_BASE, navigate]);
+  }, [navigate]);
 
   useEffect(() => {
     if (!inPool) return;
-
-    const id = window.setInterval(() => {
-      setSecondsSearching((s) => s + 1);
-    }, 1000);
-
+    const id = window.setInterval(() => setSecondsSearching((s) => s + 1), 1000);
     return () => window.clearInterval(id);
   }, [inPool]);
 
-  const searchingLabel = useMemo(() => {
-    return `Searching: ${formatSeconds(secondsSearching)}`;
-  }, [secondsSearching]);
+  const searchingLabel = useMemo(() => `Searching: ${formatSeconds(secondsSearching)}`, [secondsSearching]);
 
   function enterPool() {
     setInPool(true);
     setSecondsSearching(0);
-
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "POOL_JOIN" }));
-      console.log("[ws] sent POOL_JOIN");
-    } else {
-      console.warn("WS not open yet", ws?.readyState);
-    }
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "POOL_JOIN" }));
   }
 
   function leavePool() {
     setInPool(false);
     setSecondsSearching(0);
-
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "POOL_LEAVE" }));
-      console.log("[ws] sent POOL_LEAVE");
-    }
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "POOL_LEAVE" }));
+  }
+
+  function logout() {
+    leavePool();
+    clearAuth();
+    navigate("/login");
   }
 
   return (
     <div style={styles.container}>
       <div style={styles.card}>
-        <h1 style={styles.title}>{inPool ? "You’re in the Pool" : "Ready to Rush?"}</h1>
+        <h1 style={styles.title}>{inPool ? "You're in the Pool" : "Ready to Rush?"}</h1>
 
-        <p style={styles.subtitle}>
-          {inPool ? "Stay ready. Matches happen live." : "Live matching. Two minutes. No swiping."}
-        </p>
+        <p style={styles.subtitle}>{inPool ? "Stay ready. Matches happen live." : "Live matching. Two minutes. No swiping."}</p>
 
-        <p style={styles.apiLine}>
-          API: {apiConnected === null ? "checking…" : apiConnected ? "connected" : "not connected"}
-        </p>
+        <p style={styles.apiLine}>API: {apiConnected === null ? "checking..." : apiConnected ? "connected" : "not connected"}</p>
 
         <p style={styles.apiLine}>
           WS:{" "}
           {wsStatus === "connecting"
-            ? "connecting…"
+            ? "connecting..."
             : wsStatus === "open"
               ? "connected"
               : wsStatus === "error"
@@ -205,7 +212,7 @@ export default function Queue() {
         <div style={styles.gems}>
           <span style={styles.gemLabel}>Gems</span>
           <span style={styles.gemCount}>
-            {gems} / {gemMax}
+            {gems === null ? "..." : gems} / {gemMax === null ? "..." : gemMax}
           </span>
         </div>
 
@@ -219,19 +226,20 @@ export default function Queue() {
               <span style={styles.pulseDot} />
               <span style={styles.statusText}>{searchingLabel}</span>
             </div>
-
             <button style={styles.secondaryBtn} onClick={leavePool}>
               Cancel Search
             </button>
           </>
         )}
 
-        <p style={styles.micro}>
-          Matches are live. If you leave mid-room, you stay until the timer ends.
-        </p>
+        <p style={styles.micro}>Matches are live. If you leave mid-room, you stay until the timer ends.</p>
+
+        <button style={styles.secondaryBtn} onClick={logout}>
+          Log out
+        </button>
 
         <Link to="/" style={styles.back}>
-          ← Back
+          {"<-"} Back
         </Link>
       </div>
     </div>
@@ -263,7 +271,6 @@ const styles: Record<string, React.CSSProperties> = {
   title: { fontSize: "2rem", margin: 0 },
   subtitle: { opacity: 0.8, margin: 0 },
   apiLine: { opacity: 0.7, margin: 0, fontSize: 13 },
-
   gems: {
     display: "flex",
     justifyContent: "space-between",
@@ -274,7 +281,6 @@ const styles: Record<string, React.CSSProperties> = {
   },
   gemLabel: { opacity: 0.7 },
   gemCount: { fontWeight: 800 },
-
   primaryBtn: {
     padding: "14px",
     borderRadius: 14,
@@ -293,7 +299,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     cursor: "pointer",
   },
-
   statusRow: {
     display: "flex",
     alignItems: "center",
@@ -310,7 +315,6 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 0 18px rgba(255,255,255,0.7)",
   },
   statusText: { fontWeight: 700, opacity: 0.9 },
-
   micro: { opacity: 0.6, fontSize: 13, margin: 0 },
   back: { color: "rgba(255,255,255,0.7)", textDecoration: "none" },
 };

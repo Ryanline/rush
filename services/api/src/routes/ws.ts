@@ -13,15 +13,16 @@ type ServerMsg =
   | { type: "WS_READY" }
   | { type: "POOL_JOINED" }
   | { type: "POOL_LEFT" }
-  | { type: "MATCH_FOUND"; matchId: string; peerId: string; endsAt: number }
-  | { type: "TIMER_UPDATE"; matchId: string; endsAt: number; by: string }
-  | { type: "CHAT_MSG"; matchId: string; from: string; text: string; at: string }
+  | { type: "MATCH_FOUND"; matchId: string; peerId: string; peerName: string; endsAt: number }
+  | { type: "TIMER_UPDATE"; matchId: string; endsAt: number; by: string; byName: string }
+  | { type: "CHAT_MSG"; matchId: string; from: string; fromName: string; text: string; at: string }
   | { type: "PEER_STATUS"; matchId: string; peerId: string; status: "reconnecting" | "connected" }
   | { type: "MATCH_ENDED"; reason: "leave" | "disconnect" | "timeout" }
   | { type: "ERROR"; error: string };
 
 type ClientConn = {
   userId: string;
+  firstName: string;
   socket: any;
   socketId: number;
   matchId: string | null;
@@ -75,10 +76,10 @@ function makeMatchId(a: string, b: string) {
   return `${a}_${b}_${Date.now()}`;
 }
 
-function findMatchForUser(userId: string): { matchId: string; match: Match; peerId: string } | null {
+function findMatchForUser(userId: string): { matchId: string; match: Match; peerId: string; peerName: string } | null {
   for (const [matchId, m] of matches.entries()) {
-    if (m.a === userId) return { matchId, match: m, peerId: m.b };
-    if (m.b === userId) return { matchId, match: m, peerId: m.a };
+    if (m.a === userId) return { matchId, match: m, peerId: m.b, peerName: clients.get(m.b)?.firstName ?? "Someone" };
+    if (m.b === userId) return { matchId, match: m, peerId: m.a, peerName: clients.get(m.a)?.firstName ?? "Someone" };
   }
   return null;
 }
@@ -248,8 +249,8 @@ function tryMatchmake() {
     ca.matchId = matchId;
     cb.matchId = matchId;
 
-    send(ca.socket, { type: "MATCH_FOUND", matchId, peerId: b, endsAt });
-    send(cb.socket, { type: "MATCH_FOUND", matchId, peerId: a, endsAt });
+    send(ca.socket, { type: "MATCH_FOUND", matchId, peerId: b, peerName: cb.firstName, endsAt });
+    send(cb.socket, { type: "MATCH_FOUND", matchId, peerId: a, peerName: ca.firstName, endsAt });
   }
 }
 
@@ -292,7 +293,7 @@ async function chargeBothOrFail(app: FastifyInstance, a: string, b: string, aDev
 }
 
 export async function wsRoutes(app: FastifyInstance) {
-  app.get("/ws", { websocket: true }, (connection: any, req: any) => {
+  app.get("/ws", { websocket: true }, async (connection: any, req: any) => {
     const socket = connection?.socket ?? connection;
 
     const token = (req.query as any)?.token as string | undefined;
@@ -300,6 +301,7 @@ export async function wsRoutes(app: FastifyInstance) {
 
     let userId = "";
     let isDev = false;
+    let firstName = "Someone";
 
     const devUser = String((req.query as any)?.user ?? "").trim();
     const devToken = String(process.env.DEV_WS_BYPASS_TOKEN || "dev");
@@ -314,10 +316,16 @@ export async function wsRoutes(app: FastifyInstance) {
     if (!isProd && token === devToken) {
       isDev = true;
       userId = devUser || `dev_${Math.random().toString(16).slice(2, 8)}`;
+      firstName = userId;
     } else {
       try {
         const payload = app.jwt.verify<{ sub: string }>(token);
         userId = payload.sub;
+        const user = await app.prisma.user.findUnique({
+          where: { id: userId },
+          select: { firstName: true },
+        });
+        if (user?.firstName) firstName = user.firstName;
       } catch {
         try {
           socket.close(4403, "Invalid token");
@@ -336,7 +344,7 @@ export async function wsRoutes(app: FastifyInstance) {
       removeFromPool(userId);
     }
 
-    clients.set(userId, { userId, socket, socketId, matchId: null, isDev });
+    clients.set(userId, { userId, firstName, socket, socketId, matchId: null, isDev });
 
     send(socket, { type: "WS_READY" });
 
@@ -351,6 +359,7 @@ export async function wsRoutes(app: FastifyInstance) {
         type: "MATCH_FOUND",
         matchId: active.matchId,
         peerId: active.peerId,
+        peerName: active.peerName,
         endsAt: active.match.endsAt,
       });
 
@@ -410,6 +419,7 @@ export async function wsRoutes(app: FastifyInstance) {
           type: "CHAT_MSG",
           matchId,
           from: userId,
+          fromName: conn.firstName || userId,
           text,
           at: new Date().toISOString(),
         };
@@ -482,8 +492,12 @@ export async function wsRoutes(app: FastifyInstance) {
         m.endsAt = Math.max(Date.now(), m.endsAt) + EXTEND_MS;
         scheduleMatchTimeout(matchId, m);
 
-        if (ca?.matchId === matchId) send(ca.socket, { type: "TIMER_UPDATE", matchId, endsAt: m.endsAt, by: userId });
-        if (cb?.matchId === matchId) send(cb.socket, { type: "TIMER_UPDATE", matchId, endsAt: m.endsAt, by: userId });
+        if (ca?.matchId === matchId) {
+          send(ca.socket, { type: "TIMER_UPDATE", matchId, endsAt: m.endsAt, by: userId, byName: me?.firstName || userId });
+        }
+        if (cb?.matchId === matchId) {
+          send(cb.socket, { type: "TIMER_UPDATE", matchId, endsAt: m.endsAt, by: userId, byName: me?.firstName || userId });
+        }
 
         return;
       }

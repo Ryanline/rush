@@ -1,22 +1,45 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { clearAuth, getAuthUser, isAuthenticated } from "../lib/auth";
 
 export default function Landing() {
+  const navigate = useNavigate();
+  const authed = isAuthenticated();
+  const user = getAuthUser();
+
+  function logout() {
+    clearAuth();
+    navigate("/login");
+  }
+
   return (
     <div style={styles.container}>
       <div style={styles.card}>
         <h1 style={styles.title}>Rush</h1>
-        <p style={styles.subtitle}>
-          Electric, live speed-dating. Two minutes. Real connection.
-        </p>
+        <p style={styles.subtitle}>Electric, live speed-dating. Two minutes. Real connection.</p>
 
         <div style={styles.actions}>
-          <Link to="/signup" style={styles.primaryBtn}>Create account</Link>
-          <Link to="/login" style={styles.secondaryBtn}>Log in</Link>
+          {authed ? (
+            <>
+              <Link to="/queue" style={styles.primaryBtn}>
+                Continue as {user?.firstName ?? "User"}
+              </Link>
+              <button style={styles.secondaryBtn} onClick={logout}>
+                Log out
+              </button>
+            </>
+          ) : (
+            <>
+              <Link to="/signup" style={styles.primaryBtn}>
+                Create account
+              </Link>
+              <Link to="/login" style={styles.secondaryBtn}>
+                Log in
+              </Link>
+            </>
+          )}
         </div>
 
-        <p style={styles.micro}>
-          No swiping. No browsing. Just live chats.
-        </p>
+        <p style={styles.micro}>No swiping. No browsing. Just live chats.</p>
       </div>
     </div>
   );
@@ -51,6 +74,8 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#0f0f1a",
     textDecoration: "none",
     fontWeight: 700,
+    border: "none",
+    cursor: "pointer",
   },
   secondaryBtn: {
     padding: "12px 16px",
@@ -59,6 +84,8 @@ const styles: Record<string, React.CSSProperties> = {
     color: "white",
     textDecoration: "none",
     fontWeight: 600,
+    background: "transparent",
+    cursor: "pointer",
   },
   micro: { marginTop: 16, opacity: 0.65, fontSize: 13 },
 };

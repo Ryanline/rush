@@ -1,34 +1,97 @@
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { API_BASE, isAuthenticated, saveAuth } from "../lib/auth";
 
 export default function Signup() {
   const navigate = useNavigate();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [birthYear, setBirthYear] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (isAuthenticated()) navigate("/queue", { replace: true });
+  }, [navigate]);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setPending(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/auth/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: email.trim(),
+          password,
+          firstName: firstName.trim(),
+          birthYear: Number(birthYear),
+        }),
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.token || !data?.user) {
+        setError(data?.error || "Signup failed");
+        return;
+      }
+
+      saveAuth({ token: data.token, user: data.user });
+      navigate("/queue");
+    } catch {
+      setError("Unable to reach server");
+    } finally {
+      setPending(false);
+    }
+  }
 
   return (
     <div style={styles.container}>
-      <div style={styles.card}>
+      <form style={styles.card} onSubmit={onSubmit}>
         <h1 style={styles.title}>Create account</h1>
 
         <label style={styles.label}>Email</label>
-        <input style={styles.input} placeholder="you@example.com" />
+        <input
+          style={styles.input}
+          placeholder="you@example.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+        />
 
         <label style={styles.label}>Password</label>
-        <input style={styles.input} placeholder="••••••••" type="password" />
+        <input
+          style={styles.input}
+          placeholder="password (8+ chars)"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="new-password"
+        />
 
         <label style={styles.label}>First name</label>
-        <input style={styles.input} placeholder="Ryan" />
+        <input
+          style={styles.input}
+          placeholder="Ryan"
+          value={firstName}
+          onChange={(e) => setFirstName(e.target.value)}
+          autoComplete="given-name"
+        />
 
         <label style={styles.label}>Birth year</label>
         <input
           style={styles.input}
           placeholder="1999"
           inputMode="numeric"
+          value={birthYear}
+          onChange={(e) => setBirthYear(e.target.value)}
         />
 
-        <button
-          style={styles.primaryBtn}
-          onClick={() => navigate("/queue")}
-        >
-          Continue
+        {error ? <p style={styles.error}>{error}</p> : null}
+
+        <button style={styles.primaryBtn} disabled={pending}>
+          {pending ? "Creating account..." : "Continue"}
         </button>
 
         <p style={styles.micro}>
@@ -39,9 +102,9 @@ export default function Signup() {
         </p>
 
         <Link to="/" style={styles.back}>
-          ← Back
+          {"<-"} Back
         </Link>
-      </div>
+      </form>
     </div>
   );
 }
@@ -87,6 +150,11 @@ const styles: Record<string, React.CSSProperties> = {
     border: "none",
     fontWeight: 800,
     cursor: "pointer",
+  },
+  error: {
+    margin: 0,
+    color: "#ffb3b3",
+    fontSize: 13,
   },
   micro: { marginTop: 10, opacity: 0.7, fontSize: 13 },
   link: { color: "white" },

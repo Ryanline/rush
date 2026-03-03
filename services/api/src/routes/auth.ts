@@ -24,9 +24,12 @@ export async function authRoutes(app: FastifyInstance) {
     const parsed = SignupBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_BODY", details: parsed.error.flatten() });
 
-    const { email, password, firstName, birthYear } = parsed.data;
+    const { password, firstName, birthYear } = parsed.data;
+    const email = parsed.data.email.trim().toLowerCase();
 
-    const existing = await app.prisma.user.findUnique({ where: { email } });
+    const existing = await app.prisma.user.findFirst({
+      where: { email: { equals: email, mode: "insensitive" } },
+    });
     if (existing) return reply.code(409).send({ error: "EMAIL_IN_USE" });
 
     const passwordHash = await hashPassword(password);
@@ -68,10 +71,11 @@ export async function authRoutes(app: FastifyInstance) {
     const parsed = LoginBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_BODY", details: parsed.error.flatten() });
 
-    const { email, password } = parsed.data;
+    const { password } = parsed.data;
+    const email = parsed.data.email.trim().toLowerCase();
 
-    const user = await app.prisma.user.findUnique({
-      where: { email },
+    const user = await app.prisma.user.findFirst({
+      where: { email: { equals: email, mode: "insensitive" } },
       select: { id: true, email: true, firstName: true, birthYear: true, passwordHash: true },
     });
 

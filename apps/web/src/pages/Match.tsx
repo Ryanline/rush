@@ -1,13 +1,14 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { authFetch, buildWsUrl, clearAuth, getAuthUser } from "../lib/auth";
 
 type ServerMsg =
   | { type: "WS_READY" }
   | { type: "POOL_JOINED" }
   | { type: "POOL_LEFT" }
-  | { type: "MATCH_FOUND"; matchId: string; peerId: string; endsAt: number }
-  | { type: "TIMER_UPDATE"; matchId: string; endsAt: number; by: string }
-  | { type: "CHAT_MSG"; matchId: string; from: string; text: string; at: string }
+  | { type: "MATCH_FOUND"; matchId: string; peerId: string; peerName: string; endsAt: number }
+  | { type: "TIMER_UPDATE"; matchId: string; endsAt: number; by: string; byName: string }
+  | { type: "CHAT_MSG"; matchId: string; from: string; fromName: string; text: string; at: string }
   | { type: "PEER_STATUS"; matchId: string; peerId: string; status: "reconnecting" | "connected" }
   | { type: "MATCH_ENDED"; reason: "leave" | "disconnect" | "timeout" }
   | { type: "ERROR"; error: string };
@@ -17,116 +18,115 @@ type ClientMsg =
   | { type: "POOL_LEAVE" }
   | { type: "MATCH_EXTEND"; matchId: string };
 
+type ChatItem = { fromId: string; fromName: string; text: string; at: string };
+type MatchLocationState = { peerId?: string; peerName?: string; endsAt?: number };
+
 function formatSeconds(totalSeconds: number) {
   const mm = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
   const ss = Math.floor(totalSeconds % 60).toString().padStart(2, "0");
   return `${mm}:${ss}`;
 }
 
-function getOrCreateDevUserId(): string {
-  const key = "rush_dev_user";
-  const existing = localStorage.getItem(key);
-  if (existing) return existing;
+function getOrCreateWs(wsUrl: string): WebSocket {
+  const existing = window.__rush_ws;
+  const existingUrl = window.__rush_ws_url;
 
-  const id = `dev_${Math.random().toString(16).slice(2, 8)}`;
-  localStorage.setItem(key, id);
-  return id;
-}
-
-function getOrCreateWs(wsBase: string): WebSocket {
-  const w = window as any;
-
-  const existing: WebSocket | undefined = w.__rush_ws;
-  if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+  if (
+    existing &&
+    existingUrl === wsUrl &&
+    (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)
+  ) {
     return existing;
   }
 
-  const devUser = getOrCreateDevUserId();
-  const wsUrl = `${wsBase}?token=dev&user=${encodeURIComponent(devUser)}`;
+  if (existing && existing.readyState === WebSocket.OPEN) {
+    try {
+      existing.close(1000, "reconnect");
+    } catch {
+      // ignore close failures
+    }
+  }
 
   const ws = new WebSocket(wsUrl);
-  w.__rush_ws = ws;
+  window.__rush_ws = ws;
+  window.__rush_ws_url = wsUrl;
   return ws;
 }
-
-type ChatItem = { from: string; text: string; at: string };
 
 export default function Match() {
   const navigate = useNavigate();
   const { matchId: matchIdParam } = useParams();
   const location = useLocation();
+  const locationState = (location.state ?? {}) as MatchLocationState;
+  const me = getAuthUser();
 
   const matchId = String(matchIdParam ?? "");
-  const initialPeerId = (location.state as any)?.peerId ? String((location.state as any).peerId) : "someone";
-  const initialEndsAt = (location.state as any)?.endsAt ? Number((location.state as any).endsAt) : null;
-
-  const WS_BASE = (import.meta as any).env?.VITE_WS_URL || "ws://127.0.0.1:3001/ws";
-  const API_BASE = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:3001";
+  const initialPeerId = locationState.peerId ? String(locationState.peerId) : "someone";
+  const initialPeerName = locationState.peerName ? String(locationState.peerName) : initialPeerId;
+  const initialEndsAt = locationState.endsAt ? Number(locationState.endsAt) : null;
 
   const wsRef = useRef<WebSocket | null>(null);
+  const hasSyncedMatchRef = useRef<boolean>(!!initialEndsAt);
+  const chatBoxRef = useRef<HTMLDivElement | null>(null);
 
   const [peerId, setPeerId] = useState<string>(initialPeerId);
+  const [peerName, setPeerName] = useState<string>(initialPeerName);
   const [endsAt, setEndsAt] = useState<number | null>(initialEndsAt);
-
   const [ended, setEnded] = useState<null | { reason: string }>(null);
   const [peerReconnecting, setPeerReconnecting] = useState(false);
-
   const [chat, setChat] = useState<ChatItem[]>([]);
   const [draft, setDraft] = useState("");
-
   const [decisionSeconds, setDecisionSeconds] = useState<number>(10);
   const [extendPressed, setExtendPressed] = useState(false);
-
-  // Persistent extended banner
   const [extendedActive, setExtendedActive] = useState(false);
-  const [extendedBy, setExtendedBy] = useState<string>("");
-
-  // Gems UI
+  const [extendedBy, setExtendedBy] = useState("");
   const [gemBalance, setGemBalance] = useState<number | null>(null);
-  const [gemMsg, setGemMsg] = useState<string>("");
+  const [gemMsg, setGemMsg] = useState("");
+  const [secondsLeft, setSecondsLeft] = useState<number>(0);
 
-  const [secondsLeft, setSecondsLeft] = useState<number>(
-    endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : 0
-  );
-
-  const devUserId = useMemo(() => getOrCreateDevUserId(), []);
-
-  async function refreshGems() {
+  const refreshGems = useCallback(async () => {
     try {
-      const url = `${API_BASE}/gems/dev?userId=${encodeURIComponent(devUserId)}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data?.ok && data?.gems) {
-        setGemBalance(Number(data.gems.gems));
+      const res = await authFetch("/gems");
+      if (!res.ok) {
+        if (res.status === 401) {
+          clearAuth();
+          navigate("/login", { replace: true });
+        }
+        return;
       }
+      const data = await res.json();
+      if (data?.gems) setGemBalance(Number(data.gems.gems));
     } catch {
-      // ignore
+      // ignore gem refresh failures
     }
-  }
+  }, [navigate]);
 
-  // Countdown derived from endsAt
   useEffect(() => {
     const id = window.setInterval(() => {
       if (!endsAt) return;
       const remainingSec = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
       setSecondsLeft(remainingSec);
     }, 250);
-
     return () => window.clearInterval(id);
   }, [endsAt]);
 
-  // Safety: if time runs out again, extended banner should not persist
   useEffect(() => {
-    if (secondsLeft <= 0) {
-      setExtendedActive(false);
-      setExtendedBy("");
+    const wsUrl = buildWsUrl();
+    if (!wsUrl) {
+      clearAuth();
+      navigate("/login", { replace: true });
+      return;
     }
-  }, [secondsLeft]);
 
-  // WebSocket wiring
-  useEffect(() => {
-    const ws = getOrCreateWs(WS_BASE);
+    const ws = getOrCreateWs(wsUrl);
     wsRef.current = ws;
+
+    const onClose = (ev: CloseEvent) => {
+      if (ev.code === 4401 || ev.code === 4403) {
+        clearAuth();
+        navigate("/login", { replace: true });
+      }
+    };
 
     const onMessage = (ev: MessageEvent) => {
       try {
@@ -134,26 +134,23 @@ export default function Match() {
 
         if (msg.type === "MATCH_FOUND") {
           if (msg.matchId !== matchId) return;
+          hasSyncedMatchRef.current = true;
           setPeerId(msg.peerId);
+          setPeerName(msg.peerName || msg.peerId);
           setEndsAt(msg.endsAt);
           return;
         }
 
         if (msg.type === "TIMER_UPDATE") {
           if (msg.matchId !== matchId) return;
-
           setEndsAt(msg.endsAt);
-
           setEnded(null);
           setDecisionSeconds(10);
           setExtendPressed(false);
-
           setExtendedActive(true);
-          setExtendedBy(msg.by || "");
-
+          setExtendedBy(msg.byName || msg.by || "");
           setGemMsg("");
           refreshGems();
-
           return;
         }
 
@@ -166,7 +163,7 @@ export default function Match() {
 
         if (msg.type === "CHAT_MSG") {
           if (msg.matchId !== matchId) return;
-          setChat((prev) => [...prev, { from: msg.from, text: msg.text, at: msg.at }]);
+          setChat((prev) => [...prev, { fromId: msg.from, fromName: msg.fromName || msg.from, text: msg.text, at: msg.at }]);
           return;
         }
 
@@ -175,13 +172,10 @@ export default function Match() {
           setPeerReconnecting(false);
           setDecisionSeconds(10);
           setExtendPressed(false);
-
           setExtendedActive(false);
           setExtendedBy("");
-
           setGemMsg("");
           refreshGems();
-
           return;
         }
 
@@ -190,44 +184,56 @@ export default function Match() {
             setExtendPressed(false);
             return;
           }
-
           if (msg.error === "NOT_ENOUGH_GEMS") {
             setExtendPressed(false);
             setGemMsg("Not enough gems.");
             refreshGems();
             return;
           }
-
           setExtendPressed(false);
           return;
         }
       } catch {
-        // ignore
+        // ignore malformed socket message
       }
     };
 
+    ws.addEventListener("close", onClose);
     ws.addEventListener("message", onMessage);
-    return () => ws.removeEventListener("message", onMessage);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [WS_BASE, matchId, API_BASE, devUserId]);
+    const initialGemRefreshId = window.setTimeout(() => {
+      void refreshGems();
+    }, 0);
 
-  // decision countdown once ended
+    // If this route is opened without an active match, return user to queue.
+    const settleId = window.setTimeout(() => {
+      if (!hasSyncedMatchRef.current) navigate("/queue", { replace: true });
+    }, 2500);
+
+    return () => {
+      window.clearTimeout(initialGemRefreshId);
+      window.clearTimeout(settleId);
+      ws.removeEventListener("close", onClose);
+      ws.removeEventListener("message", onMessage);
+    };
+  }, [matchId, navigate, refreshGems]);
+
   useEffect(() => {
     if (!ended) return;
-
-    const id = window.setInterval(() => {
-      setDecisionSeconds((s) => (s <= 1 ? 0 : s - 1));
-    }, 1000);
-
+    const id = window.setInterval(() => setDecisionSeconds((s) => (s <= 1 ? 0 : s - 1)), 1000);
     return () => window.clearInterval(id);
   }, [ended]);
 
-  // Auto-return when decision countdown hits 0
   useEffect(() => {
     if (!ended) return;
     if (decisionSeconds !== 0) return;
     navigate("/queue");
   }, [ended, decisionSeconds, navigate]);
+
+  useEffect(() => {
+    const el = chatBoxRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [chat.length]);
 
   const timeLabel = useMemo(() => formatSeconds(secondsLeft), [secondsLeft]);
 
@@ -240,12 +246,9 @@ export default function Match() {
 
   function sendChat() {
     const text = draft.trim();
-    if (!text) return;
-    if (ended) return;
-
+    if (!text || ended) return;
     const ok = wsSend({ type: "CHAT_SEND", matchId, text });
-    if (!ok) return;
-    setDraft("");
+    if (ok) setDraft("");
   }
 
   function leaveMatch() {
@@ -255,7 +258,7 @@ export default function Match() {
 
   const endedTitle =
     ended?.reason === "timeout"
-      ? "Time’s up!"
+      ? "Time's up!"
       : ended?.reason === "disconnect"
         ? "They disconnected."
         : ended?.reason === "leave"
@@ -263,43 +266,31 @@ export default function Match() {
           : "Match ended.";
 
   function onExtend() {
-    if (!ended || ended.reason !== "timeout") return;
-    if (extendPressed) return;
-
+    if (!ended || ended.reason !== "timeout" || extendPressed) return;
     setGemMsg("");
     setExtendPressed(true);
-
     const ok = wsSend({ type: "MATCH_EXTEND", matchId });
     if (!ok) setExtendPressed(false);
   }
 
-  function onReport() {
-    navigate("/post-chat", { state: { matchId, peerId } });
-  }
-
-  function onBackToQueue() {
-    navigate("/queue");
-  }
-
-  const extendedLabel = extendedBy ? `Extended 💎 (by ${extendedBy})` : "Extended 💎";
+  const extendedLabel = extendedBy ? `Extended (by ${extendedBy})` : "Extended";
 
   return (
     <div style={styles.container}>
       <div style={styles.card}>
         <h1 style={styles.title}>Match</h1>
-
         <p style={styles.subtitle}>
-          You’re matched with <strong>{peerId}</strong>
+          You're matched with <strong>{peerName}</strong>
         </p>
 
         {peerReconnecting && !ended ? (
           <div style={styles.banner}>
-            <strong style={styles.bannerStrong}>Peer reconnecting…</strong>
+            <strong style={styles.bannerStrong}>Peer reconnecting...</strong>
             <span style={styles.bannerSub}>Hold on a sec.</span>
           </div>
         ) : null}
 
-        {extendedActive && !ended ? (
+        {extendedActive && !ended && secondsLeft > 0 ? (
           <div style={styles.extendedBanner}>
             <strong style={styles.extendedStrong}>{extendedLabel}</strong>
             <span style={styles.extendedSub}>This match has extra time.</span>
@@ -308,17 +299,17 @@ export default function Match() {
 
         <div style={styles.timerRow}>
           <span style={styles.timerLabel}>Time left</span>
-          <span style={styles.timerValue}>{endsAt ? timeLabel : "syncing…"}</span>
+          <span style={styles.timerValue}>{endsAt ? timeLabel : "syncing..."}</span>
         </div>
 
         {ended ? (
           <div style={styles.endMenu}>
             <div style={styles.endTitle}>{endedTitle}</div>
-            <div style={styles.endSub}>Choose an option ({decisionSeconds}s)…</div>
+            <div style={styles.endSub}>Choose an option ({decisionSeconds}s)...</div>
 
             <div style={styles.gemRow}>
               <span style={styles.gemLabel}>Gems</span>
-              <span style={styles.gemValue}>{gemBalance === null ? "…" : gemBalance}</span>
+              <span style={styles.gemValue}>{gemBalance === null ? "..." : gemBalance}</span>
             </div>
 
             {gemMsg ? <div style={styles.gemMsg}>{gemMsg}</div> : null}
@@ -333,32 +324,36 @@ export default function Match() {
                 onClick={onExtend}
                 disabled={ended.reason !== "timeout" || extendPressed}
               >
-                {extendPressed ? "Extending…" : "Extend 💎"}
+                {extendPressed ? "Extending..." : "Extend"}
               </button>
 
-              <button style={styles.secondaryBtn} onClick={onReport}>
+              <button style={styles.secondaryBtn} onClick={() => navigate("/post-chat", { state: { matchId, peerId, peerName } })}>
                 Report
               </button>
 
-              <button style={styles.secondaryBtn} onClick={onBackToQueue}>
+              <button style={styles.secondaryBtn} onClick={() => navigate("/queue")}>
                 Back to Queue
               </button>
             </div>
 
-            <div style={styles.endHint}>
-              If you don’t choose, you’ll be returned to the queue automatically.
-            </div>
+            <div style={styles.endHint}>If you don't choose, you'll return to queue automatically.</div>
           </div>
         ) : (
           <>
-            <div style={styles.chatBox}>
+            <div ref={chatBoxRef} style={styles.chatBox}>
               {chat.length === 0 ? (
-                <div style={styles.chatEmpty}>Say hi 👋</div>
+                <div style={styles.chatEmpty}>Say hi</div>
               ) : (
                 chat.map((m, idx) => (
-                  <div key={idx} style={styles.chatLine}>
-                    <span style={styles.chatFrom}>{m.from}:</span>{" "}
-                    <span style={styles.chatText}>{m.text}</span>
+                  <div key={idx} style={{ ...styles.chatLine, justifyContent: m.fromId === me?.id ? "flex-end" : "flex-start" }}>
+                    <div
+                      style={{
+                        ...(m.fromId === me?.id ? styles.myBubble : styles.theirBubble),
+                      }}
+                    >
+                      <div style={styles.chatFrom}>{m.fromName}</div>
+                      <div style={styles.chatText}>{m.text}</div>
+                    </div>
                   </div>
                 ))
               )}
@@ -369,7 +364,7 @@ export default function Match() {
                 style={styles.input}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="Type a message…"
+                placeholder="Type a message..."
                 onKeyDown={(e) => {
                   if (e.key === "Enter") sendChat();
                 }}
@@ -386,7 +381,7 @@ export default function Match() {
         )}
 
         <Link to="/queue" style={styles.back}>
-          ← Back to Queue
+          {"<-"} Back to Queue
         </Link>
       </div>
     </div>
@@ -417,61 +412,78 @@ const styles: Record<string, React.CSSProperties> = {
   },
   title: { fontSize: "2rem", margin: 0 },
   subtitle: { opacity: 0.85, margin: 0 },
-
   banner: {
-    padding: "10px 14px",
-    borderRadius: 12,
-    background: "rgba(255,255,255,0.09)",
-    border: "1px solid rgba(255,255,255,0.15)",
-    display: "flex",
-    gap: 10,
-    alignItems: "center",
-  },
-  bannerStrong: { fontWeight: 900 },
-  bannerSub: { opacity: 0.8 },
-
-  extendedBanner: {
-    padding: "10px 14px",
-    borderRadius: 12,
-    background: "rgba(255,255,255,0.12)",
     border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(255,255,255,0.08)",
+    borderRadius: 12,
+    padding: 10,
     display: "flex",
     flexDirection: "column",
-    gap: 4,
+    gap: 2,
   },
-  extendedStrong: { fontWeight: 950 },
-  extendedSub: { opacity: 0.8, fontSize: 13 },
-
+  bannerStrong: { fontSize: 14 },
+  bannerSub: { opacity: 0.8, fontSize: 13 },
+  extendedBanner: {
+    border: "1px solid rgba(170,220,255,0.5)",
+    background: "rgba(170,220,255,0.15)",
+    borderRadius: 12,
+    padding: 10,
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+  },
+  extendedStrong: { fontSize: 14 },
+  extendedSub: { opacity: 0.85, fontSize: 13 },
   timerRow: {
     display: "flex",
     justifyContent: "space-between",
-    alignItems: "center",
-    padding: "10px 14px",
     borderRadius: 12,
+    padding: "10px 14px",
     background: "rgba(255,255,255,0.06)",
   },
-  timerLabel: { opacity: 0.7 },
-  timerValue: { fontWeight: 900, fontSize: 18 },
-
+  timerLabel: { opacity: 0.75 },
+  timerValue: { fontWeight: 800 },
   chatBox: {
-    minHeight: 240,
-    borderRadius: 14,
-    padding: 14,
-    background: "rgba(255,255,255,0.06)",
-    overflow: "auto",
+    minHeight: 220,
+    maxHeight: 320,
+    overflowY: "auto",
+    borderRadius: 12,
+    padding: 12,
+    background: "rgba(0,0,0,0.22)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
   },
-  chatEmpty: { opacity: 0.6, fontStyle: "italic" },
-  chatLine: { marginBottom: 8, lineHeight: 1.35 },
-  chatFrom: { fontWeight: 800, opacity: 0.9 },
-  chatText: { opacity: 0.95 },
-
+  chatEmpty: { opacity: 0.7 },
+  chatLine: { lineHeight: 1.35, display: "flex", width: "100%" },
+  chatFrom: { fontWeight: 700, opacity: 0.95, fontSize: 12, marginBottom: 2 },
+  chatText: { opacity: 1, whiteSpace: "pre-wrap" },
+  myBubble: {
+    maxWidth: "80%",
+    alignSelf: "flex-end",
+    background: "#924DBF",
+    color: "white",
+    borderRadius: 14,
+    padding: "8px 12px",
+    border: "1px solid rgba(255,255,255,0.18)",
+  },
+  theirBubble: {
+    maxWidth: "80%",
+    alignSelf: "flex-start",
+    background: "#2d2f39",
+    color: "white",
+    borderRadius: 14,
+    padding: "8px 12px",
+    border: "1px solid rgba(255,255,255,0.14)",
+  },
   inputRow: { display: "flex", gap: 10 },
   input: {
     flex: 1,
     padding: "12px 12px",
     borderRadius: 12,
     border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(0,0,0,0.15)",
+    background: "rgba(0,0,0,0.25)",
     color: "white",
     outline: "none",
   },
@@ -484,52 +496,39 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 900,
     cursor: "pointer",
   },
-
   endMenu: {
-    padding: 16,
-    borderRadius: 14,
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.10)",
+    borderRadius: 12,
+    padding: 12,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(255,255,255,0.05)",
     display: "flex",
     flexDirection: "column",
     gap: 10,
   },
-  endTitle: { fontWeight: 950, fontSize: 22 },
+  endTitle: { fontWeight: 900, fontSize: 20 },
   endSub: { opacity: 0.8 },
-
-  gemRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "10px 14px",
-    borderRadius: 12,
-    background: "rgba(255,255,255,0.06)",
-  },
-  gemLabel: { opacity: 0.8, fontWeight: 800 },
-  gemValue: { fontWeight: 950 },
-  gemMsg: { opacity: 0.9, fontSize: 13 },
-
-  endBtns: { display: "flex", flexDirection: "column", gap: 10 },
-  endHint: { opacity: 0.65, fontSize: 13 },
-
+  gemRow: { display: "flex", justifyContent: "space-between" },
+  gemLabel: { opacity: 0.8 },
+  gemValue: { fontWeight: 900 },
+  gemMsg: { color: "#ffb3b3", fontSize: 13 },
+  endBtns: { display: "flex", gap: 10, flexWrap: "wrap" },
+  endHint: { opacity: 0.7, fontSize: 13 },
   primaryBtn: {
-    padding: "14px",
+    padding: "12px 14px",
     borderRadius: 14,
     background: "white",
     color: "#0f0f1a",
     border: "none",
     fontWeight: 900,
-    cursor: "pointer",
   },
   secondaryBtn: {
-    padding: "14px",
+    padding: "12px 14px",
     borderRadius: 14,
     background: "transparent",
     color: "white",
     border: "1px solid rgba(255,255,255,0.25)",
-    fontWeight: 800,
+    fontWeight: 700,
     cursor: "pointer",
   },
-
   back: { color: "rgba(255,255,255,0.7)", textDecoration: "none" },
 };

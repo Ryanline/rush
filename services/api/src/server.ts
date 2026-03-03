@@ -8,48 +8,51 @@ import "dotenv/config";
 
 import prismaPlugin from "./plugins/prisma";
 import jwtPlugin from "./plugins/jwt";
+import { env } from "./lib/env";
 import { authRoutes } from "./routes/auth";
 import { wsRoutes } from "./routes/ws";
 import { gemsRoutes } from "./routes/gems";
+import { meRoutes } from "./routes/me";
 
-async function buildServer() {
+function parseCorsOrigins(value: string) {
+  return value
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+export async function buildServer() {
   const app = Fastify({ logger: true });
 
-  // Security + basic protections
   await app.register(helmet);
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
   await app.register(sensible);
 
-  // Allow the Vite dev server(s) to call the API from the browser
   await app.register(cors, {
-    origin: ["http://localhost:5173", "http://localhost:5174"],
+    origin: parseCorsOrigins(env.CORS_ORIGINS),
     credentials: true,
   });
 
-  // WebSockets
   await app.register(websocket);
-
-  // Core plugins
   await app.register(prismaPlugin);
   await app.register(jwtPlugin);
 
-  // Health checks
   app.get("/health/live", async () => ({ ok: true }));
   app.get("/health/ready", async () => ({ ok: true }));
 
-  // Routes
   await app.register(authRoutes);
+  await app.register(meRoutes);
   await app.register(gemsRoutes);
   await app.register(wsRoutes);
 
   return app;
 }
 
-async function start() {
+export async function start() {
   const app = await buildServer();
 
-  const PORT = Number(process.env.PORT || 3001);
-  const HOST = process.env.HOST || "0.0.0.0";
+  const PORT = Number(env.PORT || 3001);
+  const HOST = env.HOST || "0.0.0.0";
 
   try {
     await app.listen({ port: PORT, host: HOST });
@@ -60,4 +63,6 @@ async function start() {
   }
 }
 
-start();
+if (require.main === module) {
+  start();
+}
