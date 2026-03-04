@@ -1,0 +1,54 @@
+name: Backend CD
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "services/api/**"
+      - ".github/workflows/backend-cd.yml"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+
+jobs:
+  deploy-api:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' && secrets.EC2_HOST != '' && secrets.EC2_USER != '' && secrets.EC2_SSH_KEY != '' }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/api/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/rush-api:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/rush-api:${{ github.sha }}
+
+      - name: Deploy to k3s over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            sudo kubectl -n rush set image deployment/rush-api \
+              api=${{ secrets.DOCKERHUB_USERNAME }}/rush-api:${{ github.sha }} \
+              migrate=${{ secrets.DOCKERHUB_USERNAME }}/rush-api:${{ github.sha }}
+            sudo kubectl -n rush rollout status deployment/rush-api --timeout=300s
