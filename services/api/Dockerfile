@@ -9,6 +9,8 @@ RUN npm ci --workspace api
 
 COPY services/api ./services/api
 
+RUN npm run prisma:generate --workspace api
+
 EXPOSE 3001
 
 CMD ["npm", "run", "start", "--workspace", "api"]

@@ -79,7 +79,6 @@ export default function Match() {
   const [decisionSeconds, setDecisionSeconds] = useState<number>(10);
   const [extendPressed, setExtendPressed] = useState(false);
   const [extendedActive, setExtendedActive] = useState(false);
-  const [extendedBy, setExtendedBy] = useState("");
   const [gemBalance, setGemBalance] = useState<number | null>(null);
   const [gemMsg, setGemMsg] = useState("");
   const [secondsLeft, setSecondsLeft] = useState<number>(0);
@@ -148,7 +147,6 @@ export default function Match() {
           setDecisionSeconds(10);
           setExtendPressed(false);
           setExtendedActive(true);
-          setExtendedBy(msg.byName || msg.by || "");
           setGemMsg("");
           refreshGems();
           return;
@@ -173,7 +171,6 @@ export default function Match() {
           setDecisionSeconds(10);
           setExtendPressed(false);
           setExtendedActive(false);
-          setExtendedBy("");
           setGemMsg("");
           refreshGems();
           return;
@@ -273,7 +270,7 @@ export default function Match() {
     if (!ok) setExtendPressed(false);
   }
 
-  const extendedLabel = extendedBy ? `Extended (by ${extendedBy})` : "Extended";
+  const extendedLabel = "Extended";
 
   return (
     <div style={styles.container}>
