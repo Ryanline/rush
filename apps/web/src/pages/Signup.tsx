@@ -18,7 +18,7 @@ function parseSignupError(data: any): { formError: string; fieldErrors: FieldErr
 
   if (data.error === "EMAIL_IN_USE") {
     fieldErrors.email = "An account with this email already exists.";
-    return { formError: "Please fix the highlighted fields.", fieldErrors };
+    return { formError: "Please fix the fields in red.*", fieldErrors };
   }
 
   if (data.error === "INVALID_BODY") {
@@ -30,7 +30,7 @@ function parseSignupError(data: any): { formError: string; fieldErrors: FieldErr
     if (zodFieldErrors?.birthYear?.length) fieldErrors.birthYear = "Enter a valid birth year.";
 
     if (Object.keys(fieldErrors).length > 0) {
-      return { formError: "Please fix the highlighted fields.", fieldErrors };
+      return { formError: "Please fix the fields in red.*", fieldErrors };
     }
 
     return { formError: "Invalid signup form.", fieldErrors };
