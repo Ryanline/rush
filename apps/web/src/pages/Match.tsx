@@ -478,6 +478,7 @@ const styles: Record<string, React.CSSProperties> = {
   input: {
     flex: 1,
     padding: "12px 12px",
+    fontSize: 16,
     borderRadius: 12,
     border: "1px solid rgba(255,255,255,0.18)",
     background: "rgba(0,0,0,0.25)",

@@ -6,7 +6,22 @@ Live speed-dating web app with real-time matchmaking, timed chat, and gem-based 
 
 - `apps/web`: React + Vite frontend
 - `services/api`: Fastify + Prisma backend (HTTP + WebSocket)
-- `infra/k8s/base`: Kubernetes base manifests
+- `infra/k8s/base`: Generic Kubernetes base manifests
+- `infra/k3s`: Current EC2 + k3s deployment manifests
+
+## Live Architecture (Current)
+
+- Frontend hosting: Cloudflare Pages (`rush-app-ava.pages.dev`)
+- Backend hosting: AWS EC2 (`k3s`) + NGINX ingress + cert-manager
+- API domain: `rush-api-ryan.duckdns.org`
+- Database: in-cluster PostgreSQL (Kubernetes Deployment + PVC)
+
+How traffic flows:
+
+1. Browser loads app from Cloudflare Pages.
+2. Frontend calls API at `https://rush-api-ryan.duckdns.org`.
+3. WebSocket connects to `wss://rush-api-ryan.duckdns.org/ws`.
+4. Ingress terminates TLS and routes to API service in k3s.
 
 ## Local Development
 
@@ -97,6 +112,25 @@ GitHub Actions workflow at `.github/workflows/ci.yml` runs:
 - web lint + build
 - api typecheck + tests
 
+## CD (Backend)
+
+GitHub Actions workflow at `.github/workflows/backend-cd.yml`:
+
+1. Triggers on pushes to `main` that affect backend/workflow files.
+2. Builds and pushes Docker image to Docker Hub:
+   - `<dockerhub-username>/rush-api:latest`
+   - `<dockerhub-username>/rush-api:<git-sha>`
+3. SSHes to EC2 and updates the `rush-api` deployment image.
+4. Waits for rollout success.
+
+Required GitHub repository secrets:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+- `EC2_HOST`
+- `EC2_USER`
+- `EC2_SSH_KEY`
+
 ## Kubernetes (Base)
 
 Base manifests are under `infra/k8s/base`:
@@ -123,3 +157,9 @@ Create your real secret first based on:
 - Set strong `JWT_SECRET`.
 - Set `CORS_ORIGINS` to your deployed frontend domain(s).
 - Build frontend with production `VITE_API_URL` and `VITE_WS_URL`.
+
+## Cost Controls
+
+Set up AWS budget alerts before continuing production work:
+
+- See [docs/aws-budget-alarms.md](docs/aws-budget-alarms.md)
