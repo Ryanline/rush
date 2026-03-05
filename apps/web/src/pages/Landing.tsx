@@ -15,7 +15,7 @@ export default function Landing() {
     <div style={styles.container}>
       <div style={styles.card}>
         <h1 style={styles.title}>Rush</h1>
-        <p style={styles.subtitle}>Two-minute speed-dating. Spend gems to extend a date.</p>
+        <p style={styles.subtitle}>Electric speed-dating.</p>
 
         <div style={styles.actions}>
           {authed ? (
@@ -39,7 +39,7 @@ export default function Landing() {
           )}
         </div>
 
-        <p style={styles.micro}>No swiping. No browsing. Just live chats.</p>
+        <p style={styles.micro}>Two minutes to chat. Spend gems to extend your time.</p>
       </div>
     </div>
   );
