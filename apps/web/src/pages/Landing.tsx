@@ -15,7 +15,7 @@ export default function Landing() {
     <div style={styles.container}>
       <div style={styles.card}>
         <h1 style={styles.title}>Rush</h1>
-        <p style={styles.subtitle}>Electric, live speed-dating. Two minutes. Real connection.</p>
+        <p style={styles.subtitle}>Two-minute speed-dating. Spend gems to extend a date.</p>
 
         <div style={styles.actions}>
           {authed ? (
