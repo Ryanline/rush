@@ -163,3 +163,9 @@ Create your real secret first based on:
 Set up AWS budget alerts before continuing production work:
 
 - See [docs/aws-budget-alarms.md](docs/aws-budget-alarms.md)
+
+## Elastic Experiment
+
+An experimental self-hosted Elastic Stack setup for observability is documented here:
+
+- [docs/elastic-stack.md](docs/elastic-stack.md)
